@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="format-detection" content="telephone=no">
+<title>设备信息采集</title>
+<link rel="stylesheet" href="./styles.css">
+<!-- 注意：地址获取通过后端API完成，前端不需要加载地图API -->
+</head>
+<body>
+<main class="container">
+<h1>设备信息采集</h1>
+<div id="status" class="status">准备采集</div>
+<div id="saveStatus" class="save-status" style="display: none;">
+  <div class="save-status-icon">💾</div>
+  <div class="save-status-text">
+    <div class="save-status-title">数据保存状态</div>
+    <div id="saveStatusMsg" class="save-status-msg"></div>
+  </div>
+</div>
+<div class="controls">
+<button id="refreshBtn" class="btn">重新采集</button>
+</div>
+<div id="permissionHint" class="permission-hint" style="display: none;">
+<strong>如何允许定位权限：</strong><br>
+• <strong>微信浏览器</strong>: 点击右上角"..." → 设置 → 通用 → 功能 → 位置信息 → 开启<br>
+  或者在手机系统设置中：设置 → 应用 → 微信 → 权限 → 位置信息 → 允许<br>
+• <strong>Chrome/Edge</strong>: 点击地址栏左侧的锁图标 → 网站设置 → 位置 → 允许<br>
+• <strong>Firefox</strong>: 点击地址栏左侧的锁图标 → 更多信息 → 权限 → 位置 → 允许<br>
+• <strong>Safari</strong>: Safari → 设置 → 网站 → 位置服务 → 允许<br>
+• <strong>手机浏览器</strong>: 设置 → 应用权限 → 位置信息 → 允许<br>
+<br>
+<strong>注意：</strong>微信浏览器需要在用户点击按钮后才能获取定位，请确保已点击"重新采集"按钮。
+</div>
+<!-- 位置信息卡片 -->
+<div id="locationCard" class="location-card" style="display: none;">
+  <div class="location-header">
+    <h3>📍 您的位置</h3>
+  </div>
+  <div id="addressInfo" class="address-info"></div>
+  <div class="location-coords">
+    <div class="coord-item">
+      <span class="coord-label">WGS84坐标：</span>
+      <span id="wgs84Coords" class="coord-value"></span>
+    </div>
+    <div class="coord-item">
+      <span class="coord-label">GCJ02坐标：</span>
+      <span id="gcj02Coords" class="coord-value"></span>
+    </div>
+    <div class="coord-item">
+      <span class="coord-label">精度：</span>
+      <span id="accuracyInfo" class="coord-value"></span>
+    </div>
+  </div>
+</div>
+<section class="result">
+<pre id="result"></pre>
+<div class="hint">进入页面即在后台采集并上报数据</div>
+</section>
+</main>
+<script src="./app.js"></script>
+</body>
+</html>

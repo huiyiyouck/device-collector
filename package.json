@@ -1,0 +1,17 @@
+{
+  "name": "device-collector",
+  "version": "1.0.0",
+  "description": "设备数据收集服务",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "postgres": "^3.4.3"
+  },
+  "engines": {
+    "node": ">=14.0.0"
+  }
+}
+

@@ -1,4 +1,4 @@
-// 核心功能：获取用户位置 -> 获取地址 -> 显示地址 -> 保存到数据库
+// 核心功能：微信公众号位置获取 -> 显示地址 -> 保存到数据库
 
 // 检测是否为微信浏览器
 function isWeChatBrowser() {
@@ -20,87 +20,122 @@ function queryPermission() {
   })
 }
 
+// 微信JS-SDK配置
+function configWechatSDK() {
+  if (!isWeChatBrowser()) return Promise.resolve();
+  
+  return fetch('/api/wx-config', {
+    method: 'GET',
+    headers: { 'Content-Type': 'application/json' }
+  })
+  .then(res => res.json())
+  .then(data => {
+    if (data.appId) {
+      wx.config({
+        debug: false,
+        appId: data.appId,
+        timestamp: data.timestamp,
+        nonceStr: data.nonceStr,
+        signature: data.signature,
+        jsApiList: ['getLocation']
+      });
+      
+      return new Promise((resolve) => {
+      wx.ready(() => resolve());
+      wx.error(() => {
+        // 静默失败，减少日志输出
+        resolve(); // 继续执行，不依赖JS-SDK
+      });
+      });
+    }
+  })
+  .catch(() => {
+    // 静默失败，减少日志输出
+  });
+}
+
 // 获取定位（针对微信浏览器优化）
 function getLocation() {
   return new Promise(function(resolve, reject) {
-    if (!navigator.geolocation) {
-      return reject(new Error('geolocation_unavailable'))
-    }
-    
-    // 微信浏览器优先使用 getCurrentPosition（HTML5 Geolocation API标准方法）
-    // 注意：微信浏览器基于WebView，需要用户交互（点击按钮）才能触发定位
-    if (isWeChatBrowser()) {
-      console.log('微信浏览器：使用 HTML5 Geolocation API (getCurrentPosition) 获取定位')
-      // 检查是否由用户交互触发
-      var lastInteraction = window.lastUserInteractionTime || 0;
-      var now = Date.now();
-      if (now - lastInteraction > 5000) { // 5秒内的交互才视为有效
-        console.warn('微信浏览器：定位请求未在用户交互时间窗口内');
-        var interactionErr = new Error('请点击"重新采集"按钮开始定位（微信浏览器需要用户交互）');
-        interactionErr.code = 999; // 自定义错误代码
-        interactionErr.hint = '微信浏览器限制：必须在用户点击按钮后的短时间内请求定位权限';
-        return reject(interactionErr);
-      }
-      
-      // 创建重试计数器
-      var retryCount = 0;
-      var maxRetries = 2; // 增加重试次数，提高成功率
-      
-      function attemptLocation() {
-        navigator.geolocation.getCurrentPosition(
-          function(pos) {
-            console.log('微信浏览器：HTML5 Geolocation API 定位成功', pos.coords.latitude, pos.coords.longitude)
-            resolve({
-              lat: pos.coords.latitude,
-              lon: pos.coords.longitude,
-              accuracy: pos.coords.accuracy || 9999,
-              timestamp: pos.timestamp
-            })
-          },
-          function(err) {
-            console.error('微信浏览器：HTML5 Geolocation API 定位失败', err.code, err.message)
-            
-            // 如果是超时错误且未达到最大重试次数，则重试
-            if (err.code === 3 && retryCount < maxRetries) {
-              retryCount++;
-              console.log(`微信浏览器：定位超时，正在进行第 ${retryCount} 次重试`);
-              // 使用setTimeout确保在同一个事件循环中不会立即重试
-              setTimeout(attemptLocation, 100);
-              return;
-            }
-            
-            // 如果是权限错误，提供更详细的错误信息
-            if (err.code === 1) {
-              var detailedErr = new Error('定位权限被拒绝（微信浏览器）')
-              detailedErr.code = 1
-              detailedErr.originalMessage = err.message
-              detailedErr.hint = '请在微信设置中开启位置权限，或点击"重新采集"按钮重试';
-              reject(detailedErr)
-            } else if (err.code === 2) {
-              var networkErr = new Error('定位服务不可用（请检查GPS和网络）')
-              networkErr.code = 2
-              reject(networkErr)
-            } else if (err.code === 3) {
-              var timeoutErr = new Error('定位超时（请检查网络连接，确保GPS已开启）')
-              timeoutErr.code = 3
-              reject(timeoutErr)
-            } else {
-              reject(err)
-            }
-          },
-          {
-            // HTML5 Geolocation API 标准参数
-            enableHighAccuracy: true,  // 尝试获取高精度位置
-            maximumAge: 60000,         // 允许使用60秒内的缓存位置（微信浏览器更宽松，减少请求）
-            timeout: 30000             // 增加到30秒超时（微信浏览器可能需要更长时间）
-          }
-        );
-      }
-      
-      // 开始尝试定位
-      attemptLocation();
+    // 微信浏览器优先使用微信JS-SDK的定位功能
+    if (isWeChatBrowser() && window.wx && window.wx.getLocation) {
+      wx.getLocation({
+        type: 'gcj02', // 使用国测局坐标系
+        success: function(res) {
+          resolve({
+            lat: res.latitude,
+            lon: res.longitude,
+            accuracy: res.accuracy || 9999,
+            timestamp: Date.now()
+          });
+        },
+        fail: function() {
+          // JS-SDK失败后回退到HTML5定位
+          fallbackToHtml5Location(resolve, reject);
+        }
+      });
       return;
     }
+    
+    // 微信浏览器或其他浏览器使用HTML5 Geolocation API
+    if (!navigator.geolocation) {
+      return reject(new Error('geolocation_unavailable'));
+    }
+    
+    // 对于微信浏览器，不检查交互时间窗口，直接尝试定位
+    if (isWeChatBrowser()) {
+      // 直接调用HTML5定位，不要求用户交互
+      fallbackToHtml5Location(resolve, reject);
+      return;
+    }
+    
+    // 辅助函数：使用HTML5 API定位
+    function fallbackToHtml5Location(resolve, reject) {
+        var retryCount = 0;
+        var maxRetries = 2;
+        
+        function attemptLocation() {
+          navigator.geolocation.getCurrentPosition(
+            function(pos) {
+              resolve({
+                lat: pos.coords.latitude,
+                lon: pos.coords.longitude,
+                accuracy: pos.coords.accuracy || 9999,
+                timestamp: pos.timestamp
+              });
+            },
+            function(err) {
+              // 重试机制
+              if (err.code === 3 && retryCount < maxRetries) {
+                retryCount++;
+                setTimeout(attemptLocation, 100);
+                return;
+              }
+              
+              // 简化错误消息
+              if (err.code === 1) {
+                reject(new Error('需要定位权限'));
+              } else if (err.code === 2) {
+                reject(new Error('定位服务不可用'));
+              } else if (err.code === 3) {
+                reject(new Error('定位超时'));
+              } else {
+                reject(err);
+              }
+            },
+            {
+              enableHighAccuracy: true,
+              maximumAge: 60000,
+              timeout: 30000
+            }
+          );
+        }
+        
+        attemptLocation();
+      }
+      
+      // 非微信浏览器的定位逻辑
+      fallbackToHtml5Location(resolve, reject);
     
     // 其他浏览器使用 watchPosition（更精确）
     var bestPosition = null
@@ -489,7 +524,7 @@ function collect() {
         })
     })
     .catch(function(err) {
-      console.error('定位错误详情:', err)
+      // 静默处理定位错误，减少日志输出
       var errorMsg = '定位失败'
       var showHint = false
       
@@ -639,33 +674,33 @@ document.addEventListener('DOMContentLoaded', function() {
       })
     }
     
-    // 微信浏览器特殊处理：需要用户交互才能获取定位
+    // 微信浏览器处理：先配置JS-SDK，然后直接尝试获取位置
     if (isWeChatBrowser()) {
-      // 微信浏览器中，显示自动交互引导层
-      triggerAutoInteraction();
-      
-      // 同时保留原有提示，确保用户可以手动触发
-      if (statusEl) {
-        statusEl.textContent = '请点击"允许获取位置"按钮开始定位';
-        statusEl.className = 'status';
-      }
+      // 先配置微信JS-SDK
+      configWechatSDK().then(function() {
+        // SDK配置完成后，直接开始定位
+        collect();
+      }).catch(function() {
+        // 即使SDK配置失败，也尝试获取位置
+        collect();
+      });
     } else {
       // 其他浏览器自动开始采集
-      collect()
+      collect();
     }
   } catch (e) {
-    console.error('页面初始化失败:', e)
-    var statusEl = document.getElementById('status')
+    // 静默处理初始化错误
+    var statusEl = document.getElementById('status');
     if (statusEl) {
-      statusEl.textContent = '页面加载失败，请刷新重试'
-      statusEl.className = 'status error'
+      statusEl.textContent = '页面加载失败，请刷新重试';
+      statusEl.className = 'status error';
     }
   }
 })
 
 // 全局错误处理（捕获未处理的错误）
 window.addEventListener('error', function(e) {
-  console.error('页面错误:', e.message, e.filename, e.lineno)
+  // 静默处理错误，减少日志输出
   var statusEl = document.getElementById('status')
   if (statusEl && statusEl.textContent === '准备采集') {
     statusEl.textContent = '页面加载出错，请刷新重试'

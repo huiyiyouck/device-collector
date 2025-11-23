@@ -3,9 +3,37 @@ import https from 'https'
 import fs from 'fs'
 import path from 'path'
 import url from 'url'
+import { createHash } from 'crypto'
 import sql from './db.js'
 
 const PORT = process.env.PORT || 3000
+
+// 日志级别配置：silent(静默) | error(仅错误) | warn(警告+错误) | info(信息+警告+错误) | debug(全部)
+const LOG_LEVEL = (process.env.LOG_LEVEL || 'error').toLowerCase()
+
+// 日志工具函数
+const logger = {
+  debug: (...args) => {
+    if (['debug'].includes(LOG_LEVEL)) {
+      console.log('[DEBUG]', ...args)
+    }
+  },
+  info: (...args) => {
+    if (['debug', 'info'].includes(LOG_LEVEL)) {
+      console.log('[INFO]', ...args)
+    }
+  },
+  warn: (...args) => {
+    if (['debug', 'info', 'warn'].includes(LOG_LEVEL)) {
+      console.warn('[WARN]', ...args)
+    }
+  },
+  error: (...args) => {
+    if (['debug', 'info', 'warn', 'error'].includes(LOG_LEVEL)) {
+      console.error('[ERROR]', ...args)
+    }
+  }
+}
 
 // 微信配置（从环境变量读取，或直接配置）
 const WX_APPID = process.env.WX_APPID || ''
@@ -48,6 +76,64 @@ function getClientIp(req) {
   return req.socket.remoteAddress
 }
 
+// 处理微信JS-SDK配置请求
+async function handleWxConfigRequest(req, res) {
+  try {
+    // 添加 CORS 头
+    const addCorsHeaders = () => {
+      if (!res.headersSent) {
+        res.setHeader('Access-Control-Allow-Origin', '*')
+        res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+        res.setHeader('Access-Control-Allow-Headers', 'Content-Type')
+      }
+    }
+    
+    // 获取请求的完整URL（不包含#及其后面部分）
+    // 优先使用 referer，如果没有则从请求头构建
+    let url = req.headers.referer || ''
+    
+    if (!url) {
+      // 从请求头构建完整 URL
+      const host = req.headers.host || 'localhost:3000'
+      const protocol = req.headers['x-forwarded-proto'] || 'http'
+      const parsedUrl = url.parse(req.url)
+      const pathname = parsedUrl.pathname || '/'
+      url = `${protocol}://${host}${pathname}`
+    }
+    
+    // 去掉 # 及其后面的部分
+    url = url.split('#')[0]
+    
+    // 如果 URL 为空或无效，使用默认值
+    if (!url || !url.startsWith('http')) {
+      const host = req.headers.host || '192.168.31.213:3000'
+      url = `http://${host}/`
+    }
+    
+    const config = await getWechatJsConfig(url)
+    
+    if (config) {
+      addCorsHeaders()
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify(config))
+    } else {
+      // 如果配置失败，返回基本配置，让前端尝试使用普通定位
+      addCorsHeaders()
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ appId: WX_APPID }))
+    }
+  } catch (err) {
+    logger.debug('处理微信配置请求出错:', err)
+    if (!res.headersSent) {
+      res.setHeader('Access-Control-Allow-Origin', '*')
+      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type')
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ appId: WX_APPID })) // 返回 appId，让前端继续执行
+    }
+  }
+}
+
 // 保存数据到数据库
 async function saveToDatabase(record) {
   try {
@@ -86,27 +172,23 @@ async function saveToDatabase(record) {
       )
     `
   } catch (err) {
-    // 记录详细的错误信息
-    console.error(`[${new Date().toISOString()}] ✗ 数据库保存异常:`, err.message)
-    console.error(`  错误代码: ${err.code || 'unknown'}`)
-    if (err.detail) {
-      console.error(`  PostgreSQL详情: ${err.detail}`)
-    }
-    if (err.hint) {
-      console.error(`  提示: ${err.hint}`)
-    }
-    // 尝试序列化错误对象（避免循环引用）
-    try {
-      const errorInfo = {
-        message: err.message,
-        code: err.code,
-        detail: err.detail,
-        hint: err.hint,
-        severity: err.severity
+    // 根据日志级别输出错误信息
+    logger.error(`DB Error: ${err.code || 'unknown'} - ${err.message}`)
+    if (LOG_LEVEL === 'debug') {
+      if (err.detail) logger.debug(`  PostgreSQL详情: ${err.detail}`)
+      if (err.hint) logger.debug(`  提示: ${err.hint}`)
+      try {
+        const errorInfo = {
+          message: err.message,
+          code: err.code,
+          detail: err.detail,
+          hint: err.hint,
+          severity: err.severity
+        }
+        logger.debug(`  错误详情:`, JSON.stringify(errorInfo, null, 2))
+      } catch (e) {
+        // 忽略序列化错误
       }
-      console.error(`  错误详情:`, JSON.stringify(errorInfo, null, 2))
-    } catch (e) {
-      console.error(`  错误消息: ${err.message}`)
     }
     throw err // 重新抛出错误，让调用者处理
   }
@@ -148,6 +230,11 @@ function httpGet(urlStr, timeout = 5000) {
   })
 }
 
+// 生成随机字符串
+function generateNonceStr() {
+  return Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
+}
+
 // 通过code获取微信access_token
 async function getWxAccessToken(code) {
   if (!WX_APPID || !WX_APPSECRET) {
@@ -155,6 +242,45 @@ async function getWxAccessToken(code) {
   }
   const tokenUrl = `https://api.weixin.qq.com/sns/oauth2/access_token?appid=${WX_APPID}&secret=${WX_APPSECRET}&code=${code}&grant_type=authorization_code`
   return await httpGet(tokenUrl)
+}
+
+// 获取微信JS-SDK配置
+async function getWechatJsConfig(url) {
+  try {
+    // 获取access_token
+    const tokenResponse = await httpGet(`https://api.weixin.qq.com/cgi-bin/token?grant_type=client_credential&appid=${WX_APPID}&secret=${WX_APPSECRET}`);
+    
+    if (!tokenResponse.access_token) {
+      throw new Error('获取access_token失败');
+    }
+    
+    // 获取jsapi_ticket
+    const ticketResponse = await httpGet(`https://api.weixin.qq.com/cgi-bin/ticket/getticket?access_token=${tokenResponse.access_token}&type=jsapi`);
+    
+    if (ticketResponse.errcode !== 0) {
+      throw new Error('获取jsapi_ticket失败: ' + ticketResponse.errmsg);
+    }
+    
+    // 生成签名
+      const nonceStr = generateNonceStr();
+      const timestamp = Math.floor(Date.now() / 1000).toString();
+      const jsapi_ticket = ticketResponse.ticket;
+      
+      // 使用crypto模块生成sha1签名
+      const signatureStr = `jsapi_ticket=${jsapi_ticket}&noncestr=${nonceStr}&timestamp=${timestamp}&url=${url}`;
+      const signature = createHash('sha1').update(signatureStr).digest('hex');
+      
+      return {
+        appId: WX_APPID,
+        timestamp: timestamp,
+        nonceStr: nonceStr,
+        signature: signature,
+        url: url
+      };
+  } catch (err) {
+    logger.debug('获取微信JS-SDK配置失败:', err);
+    return null;
+  }
 }
 
 // 通过access_token获取微信用户信息
@@ -215,18 +341,12 @@ async function getBaiduAddressFromCoords(lat, lon) {
         distance: addressComponent.distance || ''
       }
     } else if (data && data.status) {
-      // API返回了错误状态（只记录关键错误，减少日志IO）
-      // 常见错误码：4/5/101=服务被禁用，210=IP白名单，其他错误静默处理
-      if (data.status === 4 || data.status === 5 || data.status === 101 || data.status === 210) {
-        const errorMsg = data.message || `错误代码: ${data.status}`
-        console.error(`[${new Date().toISOString()}] 百度地图API错误: ${errorMsg}`)
-      }
-      // 其他错误静默处理，返回null
+      // 静默处理所有错误，减少日志输出
       return null
     }
     return null
   } catch (e) {
-    console.error('获取百度地图地址信息失败:', e.message)
+    logger.debug('获取百度地图地址信息失败:', e.message)
     return null
   }
 }
@@ -284,7 +404,7 @@ async function getAmapAddressFromCoords(lat, lon, useGcj02 = true) {
     }
     return null
   } catch (e) {
-    console.error('获取高德地图地址信息失败:', e.message)
+    logger.debug('获取百度地图地址信息失败:', e.message)
     return null
   }
 }
@@ -300,8 +420,8 @@ async function getAllAddresses(gcj02Lat, gcj02Lon, wgs84Lat, wgs84Lon) {
   // 高德地址是必需的，百度地址是可选的
   const [amapAddress, baiduAddress] = await Promise.all([
     // 高德地图使用GCJ02坐标（优先，必需）
-    getAmapAddressFromCoords(gcj02Lat, gcj02Lon, true).catch(err => {
-      console.error(`[${new Date().toISOString()}] ✗ 获取高德地址失败:`, err.message)
+    getAmapAddressFromCoords(gcj02Lat, gcj02Lon, true).catch((err) => {
+      logger.warn(`获取高德地址失败:`, err.message)
       return null
     }),
     // 百度地图使用BD09坐标（可选，失败不影响，静默失败）
@@ -311,9 +431,9 @@ async function getAllAddresses(gcj02Lat, gcj02Lon, wgs84Lat, wgs84Lon) {
     })
   ])
   
-  // 只在失败时记录警告
+  // 记录高德地址获取失败
   if (!amapAddress) {
-    console.warn(`[${new Date().toISOString()}] ⚠️ 高德地址获取失败`)
+    logger.warn('高德地址获取失败')
   }
   
   // 即使百度地址失败，只要有高德地址就返回成功
@@ -368,26 +488,12 @@ async function getTencentAddressFromCoords(lat, lon) {
         landmark_l2: result.landmark_l2 ? result.landmark_l2.title : ''
       }
     } else if (data && data.status) {
-      // API返回了错误状态
-      const errorMsg = data.message || `错误代码: ${data.status}`
-      console.error(`腾讯地图API调用失败: ${errorMsg}`)
-      
-      // 常见错误码说明
-      if (data.status === 311) {
-        console.error('  提示: 请求参数信息有误')
-      } else if (data.status === 310) {
-        console.error('  提示: 请求参数信息有误')
-      } else if (data.status === 306) {
-        console.error('  提示: 请求有误，请检查key是否正确')
-      } else if (data.status === 1000) {
-        console.error('  提示: 服务器内部错误')
-      }
-      
+      // 静默处理所有错误，减少日志输出
       return null
     }
     return null
   } catch (e) {
-    console.error('获取腾讯地图地址信息失败:', e.message)
+    logger.debug('获取百度地图地址信息失败:', e.message)
     return null
   }
 }
@@ -496,6 +602,12 @@ const server = http.createServer(async (req, res) => {
     return res.end(JSON.stringify({ ok: true, authUrl: authUrl }))
   }
   
+  // 微信JS-SDK配置API
+  if (req.method === 'GET' && parsed.pathname === '/api/wx-config') {
+    handleWxConfigRequest(req, res);
+    return;
+  }
+  
   // 获取地址信息API（通过经纬度）- 返回高德地址，可选返回百度地址
   if (req.method === 'GET' && parsed.pathname === '/api/address') {
     const query = new URLSearchParams(parsed.query || '')
@@ -515,7 +627,7 @@ const server = http.createServer(async (req, res) => {
       const amapAddress = await getAmapAddressFromCoords(lat, lon, coordType === 'gcj02')
       
       if (!amapAddress) {
-        console.error(`[${new Date().toISOString()}] ⚠️ 高德地址获取失败 - 坐标: (${lat}, ${lon})`)
+        logger.warn(`高德地址获取失败 - 坐标: (${lat}, ${lon})`)
         addCorsHeaders()
         res.writeHead(200, { 'Content-Type': 'application/json' })
         return res.end(JSON.stringify({ ok: false, code: 'address_not_found' }))
@@ -561,7 +673,7 @@ const server = http.createServer(async (req, res) => {
         tencent: tencentAddress // 如果获取失败则为 null
       }))
     } catch (e) {
-      console.error(`[${new Date().toISOString()}] ✗ 地址获取异常:`, e.message)
+      logger.error(`地址获取异常:`, e.message)
       if (!res.headersSent) {
         addCorsHeaders()
         res.writeHead(500, { 'Content-Type': 'application/json' })
@@ -662,7 +774,10 @@ const server = http.createServer(async (req, res) => {
         }
         return // 确保不会继续执行
       } catch (err) {
-        console.error(`[${new Date().toISOString()}] ✗ 保存到数据库失败 - IP: ${ip}, 错误:`, err.message)
+        logger.error(`保存到数据库失败 - IP: ${ip}, 错误:`, err.message)
+        if (LOG_LEVEL === 'debug') {
+          logger.debug(`  错误详情:`, err)
+        }
         if (!res.headersSent) {
           addCorsHeaders()
           res.writeHead(500, { 'Content-Type': 'application/json' })
@@ -675,7 +790,10 @@ const server = http.createServer(async (req, res) => {
         return
       }
     } catch (e) {
-      console.error(`[${new Date().toISOString()}] ✗ 处理请求异常:`, e.message)
+      logger.error(`处理请求异常:`, e.message)
+      if (LOG_LEVEL === 'debug') {
+        logger.debug(`  异常堆栈:`, e.stack)
+      }
       if (!res.headersSent) {
         addCorsHeaders()
         res.writeHead(400, { 'Content-Type': 'application/json' })
@@ -694,14 +812,15 @@ const server = http.createServer(async (req, res) => {
 })
 
 server.listen(PORT, () => {
-  console.log(`服务器已启动，监听端口 ${PORT}`)
-  console.log(`访问地址: http://localhost:${PORT}`)
+  logger.info(`服务器已启动，监听端口 ${PORT}`)
+  logger.info(`访问地址: http://localhost:${PORT}`)
+  logger.info(`日志级别: ${LOG_LEVEL.toUpperCase()}`)
 }).on('error', (err) => {
   if (err.code === 'EADDRINUSE') {
-    console.error(`端口 ${PORT} 已被占用，请先停止其他服务`)
+    logger.error(`端口 ${PORT} 已被占用，请先停止其他服务`)
     process.exit(1)
   } else {
-    console.error('服务器启动失败:', err)
+    logger.error('服务器启动失败:', err)
     process.exit(1)
   }
 })
